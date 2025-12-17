@@ -1,83 +1,186 @@
-name: Build IPA (Unsigned)
+import SwiftUI
 
-on:
-  workflow_dispatch:
+struct ContentView: View {
 
-jobs:
-  build:
-    runs-on: macos-latest
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
+    @State private var display = "0"
+    @State private var storedValue: Double? = nil
+    @State private var pendingOp: Op? = nil
+    @State private var isTyping = false
 
-      # Nếu bạn upload source bình thường (có .xcodeproj nằm trực tiếp trong repo) thì bỏ bước unzip.
-      # Nếu bạn upload 1 file zip (ví dụ SimpleCalculator.zip) thì để bước này và sửa tên zip cho đúng.
-      - name: Unzip project if needed
-        run: |
-          ls -la
-          if ls *.zip 1> /dev/null 2>&1; then
-            echo "Found zip, extracting..."
-            unzip -o "*.zip" -d project
-            echo "Extracted to ./project"
-          else
-            echo "No zip found, using repo root."
-          fi
+    enum Op { case add, sub, mul, div }
 
-      - name: Detect workspace folder
-        run: |
-          if [ -d "project" ]; then
-            echo "WORKDIR=project" >> $GITHUB_ENV
-          else
-            echo "WORKDIR=." >> $GITHUB_ENV
-          fi
-          echo "Using WORKDIR=$WORKDIR"
+    var body: some View {
+        VStack(spacing: 12) {
+            Spacer()
 
-      - name: List xcode projects
-        run: |
-          cd "$WORKDIR"
-          find . -maxdepth 3 -name "*.xcodeproj" -print
-          find . -maxdepth 3 -name "*.xcworkspace" -print
+            Text(display)
+                .font(.system(size: 64, weight: .semibold, design: .rounded))
+                .frame(maxWidth: .infinity, alignment: .trailing)
+                .lineLimit(1)
+                .minimumScaleFactor(0.3)
+                .padding(.horizontal, 20)
 
-      # ⚠️ Bạn cần sửa SCHEME và APP_NAME đúng với dự án của bạn
-      - name: Build (no code signing)
-        run: |
-          cd "$WORKDIR"
-          SCHEME="SimpleCalculator"
-          APP_NAME="SimpleCalculator"
+            VStack(spacing: 10) {
+                row(["AC", "÷", "×", "−"])
+                row(["7", "8", "9", "+"])
+                row(["4", "5", "6", "="], specialEquals: true)
+                row(["1", "2", "3", "."])
+                HStack(spacing: 10) {
+                    button("0", wide: true)
+                    button("⌫")
+                }
+            }
+            .padding(.horizontal, 16)
+            .padding(.bottom, 24)
+        }
+        .background(Color(.systemBackground))
+    }
 
-          xcodebuild -version
+    // MARK: - UI Helpers
 
-          # Nếu dự án dùng .xcworkspace thì bạn đổi -project thành -workspace
-          xcodebuild \
-            -project "$APP_NAME.xcodeproj" \
-            -scheme "$SCHEME" \
-            -configuration Release \
-            -sdk iphoneos \
-            -derivedDataPath build \
-            CODE_SIGNING_ALLOWED=NO \
-            build
+    @ViewBuilder
+    private func row(_ titles: [String], specialEquals: Bool = false) -> some View {
+        HStack(spacing: 10) {
+            ForEach(titles, id: \.self) { t in
+                if specialEquals && t == "=" {
+                    button(t, isEquals: true)
+                } else {
+                    button(t)
+                }
+            }
+        }
+    }
 
-      - name: Package IPA
-        run: |
-          cd "$WORKDIR"
-          APP_PATH="build/Build/Products/Release-iphoneos/SimpleCalculator.app"
+    private func button(_ title: String, wide: Bool = false, isEquals: Bool = false) -> some View {
+        let bg: Color = {
+            if isEquals { return Color.green.opacity(0.22) }
+            if ["+", "−", "×", "÷"].contains(title) { return Color.orange.opacity(0.22) }
+            if ["AC", "⌫"].contains(title) { return Color.gray.opacity(0.22) }
+            return Color.blue.opacity(0.18)
+        }()
 
-          if [ ! -d "$APP_PATH" ]; then
-            echo "APP not found at: $APP_PATH"
-            echo "Listing Release-iphoneos folder:"
-            ls -la build/Build/Products/Release-iphoneos || true
-            exit 1
-          fi
+        return Button {
+            tap(title)
+        } label: {
+            Text(title)
+                .font(.system(size: 24, weight: .semibold, design: .rounded))
+                .frame(maxWidth: wide ? .infinity : nil)
+                .frame(height: 56)
+                .frame(minWidth: wide ? 0 : 56)
+                .background(bg)
+                .clipShape(RoundedRectangle(cornerRadius: 14))
+        }
+    }
 
-          rm -rf Payload
-          mkdir -p Payload
-          cp -R "$APP_PATH" Payload/
-          zip -r SimpleCalculator.ipa Payload
-          ls -la SimpleCalculator.ipa
+    // MARK: - Logic
 
-      - name: Upload IPA artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: SimpleCalculator-IPA
-          path: |
-            **/SimpleCalculator.ipa
+    private func tap(_ t: String) {
+        switch t {
+
+        case "AC":
+            display = "0"
+            storedValue = nil
+            pendingOp = nil
+            isTyping = false
+
+        case "⌫":
+            if isTyping {
+                display.removeLast()
+                if display.isEmpty {
+                    display = "0"
+                    isTyping = false
+                }
+            } else {
+                display = "0"
+            }
+
+        case ".":
+            if !isTyping {
+                display = "0."
+                isTyping = true
+            } else if !display.contains(".") {
+                display += "."
+            }
+
+        case "+", "−", "×", "÷":
+            commitPendingIfNeeded()
+            storedValue = parse(display)
+            pendingOp = op(from: t)
+            isTyping = false
+
+        case "=":
+            guard let op = pendingOp,
+                  let a = storedValue else { return }
+            let b = parse(display)
+            let result = apply(op: op, a: a, b: b)
+            display = format(result)
+            storedValue = nil
+            pendingOp = nil
+            isTyping = false
+
+        default: // numbers
+            if isTyping {
+                if display == "0" {
+                    display = t
+                } else {
+                    display += t
+                }
+            } else {
+                display = t
+                isTyping = true
+            }
+        }
+    }
+
+    private func op(from s: String) -> Op {
+        switch s {
+        case "+": return .add
+        case "−": return .sub
+        case "×": return .mul
+        default:  return .div
+        }
+    }
+
+    private func commitPendingIfNeeded() {
+        if let op = pendingOp,
+           let a = storedValue,
+           isTyping {
+            let b = parse(display)
+            let result = apply(op: op, a: a, b: b)
+            display = format(result)
+            storedValue = result
+            isTyping = false
+        }
+    }
+
+    private func apply(op: Op, a: Double, b: Double) -> Double {
+        switch op {
+        case .add: return a + b
+        case .sub: return a - b
+        case .mul: return a * b
+        case .div: return b == 0 ? 0 : a / b
+        }
+    }
+
+    // MARK: - Number Format (VN)
+
+    private func format(_ x: Double) -> String {
+        if x.isInfinite || x.isNaN { return "0" }
+
+        let formatter = NumberFormatter()
+        formatter.numberStyle = .decimal
+        formatter.locale = Locale(identifier: "vi_VN") // 🇻🇳
+        formatter.maximumFractionDigits = 8
+        formatter.minimumFractionDigits = 0
+
+        return formatter.string(from: NSNumber(value: x)) ?? "0"
+    }
+
+    private func parse(_ text: String) -> Double {
+        // Chuyển từ dạng hiển thị VN về Double
+        let normalized = text
+            .replacingOccurrences(of: ".", with: "")
+            .replacingOccurrences(of: ",", with: ".")
+        return Double(normalized) ?? 0
+    }
+}
