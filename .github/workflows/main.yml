@@ -1,0 +1,83 @@
+name: Build IPA (Unsigned)
+
+on:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: macos-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # Nếu bạn upload source bình thường (có .xcodeproj nằm trực tiếp trong repo) thì bỏ bước unzip.
+      # Nếu bạn upload 1 file zip (ví dụ SimpleCalculator.zip) thì để bước này và sửa tên zip cho đúng.
+      - name: Unzip project if needed
+        run: |
+          ls -la
+          if ls *.zip 1> /dev/null 2>&1; then
+            echo "Found zip, extracting..."
+            unzip -o "*.zip" -d project
+            echo "Extracted to ./project"
+          else
+            echo "No zip found, using repo root."
+          fi
+
+      - name: Detect workspace folder
+        run: |
+          if [ -d "project" ]; then
+            echo "WORKDIR=project" >> $GITHUB_ENV
+          else
+            echo "WORKDIR=." >> $GITHUB_ENV
+          fi
+          echo "Using WORKDIR=$WORKDIR"
+
+      - name: List xcode projects
+        run: |
+          cd "$WORKDIR"
+          find . -maxdepth 3 -name "*.xcodeproj" -print
+          find . -maxdepth 3 -name "*.xcworkspace" -print
+
+      # ⚠️ Bạn cần sửa SCHEME và APP_NAME đúng với dự án của bạn
+      - name: Build (no code signing)
+        run: |
+          cd "$WORKDIR"
+          SCHEME="SimpleCalculator"
+          APP_NAME="SimpleCalculator"
+
+          xcodebuild -version
+
+          # Nếu dự án dùng .xcworkspace thì bạn đổi -project thành -workspace
+          xcodebuild \
+            -project "$APP_NAME.xcodeproj" \
+            -scheme "$SCHEME" \
+            -configuration Release \
+            -sdk iphoneos \
+            -derivedDataPath build \
+            CODE_SIGNING_ALLOWED=NO \
+            build
+
+      - name: Package IPA
+        run: |
+          cd "$WORKDIR"
+          APP_PATH="build/Build/Products/Release-iphoneos/SimpleCalculator.app"
+
+          if [ ! -d "$APP_PATH" ]; then
+            echo "APP not found at: $APP_PATH"
+            echo "Listing Release-iphoneos folder:"
+            ls -la build/Build/Products/Release-iphoneos || true
+            exit 1
+          fi
+
+          rm -rf Payload
+          mkdir -p Payload
+          cp -R "$APP_PATH" Payload/
+          zip -r SimpleCalculator.ipa Payload
+          ls -la SimpleCalculator.ipa
+
+      - name: Upload IPA artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: SimpleCalculator-IPA
+          path: |
+            **/SimpleCalculator.ipa
